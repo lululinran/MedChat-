@@ -102,7 +102,23 @@ services:
       - standalone
     networks:
       - default  
-
+  neo4j:
+    container_name: supermew-neo4j
+    image: neo4j:5.18.1-community
+    environment:
+      NEO4J_AUTH: neo4j/supermew123
+    ports:
+      - "7474:7474"   # Web 管理界面
+      - "7687:7687"   # Bolt 协议
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/neo4j:/data
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "supermew123", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 networks:
   default:
     name: milvus
+    
+  

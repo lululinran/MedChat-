@@ -7,15 +7,15 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Up
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from agent import chat_with_agent, chat_with_agent_stream, storage
-from auth import authenticate_user, create_access_token, get_current_user, get_db, get_password_hash, require_admin, resolve_role
-from document_loader import DocumentLoader
-from embedding import embedding_service
-from milvus_client import MilvusManager
-from milvus_writer import MilvusWriter
-from models import User
-from parent_chunk_store import ParentChunkStore
-from schemas import (
+from .agent import chat_with_agent, chat_with_agent_stream, storage
+from .auth import authenticate_user, create_access_token, get_current_user, get_db, get_password_hash, require_admin, resolve_role
+from .document_loader import DocumentLoader
+from .embedding import embedding_service
+from .milvus_client import MilvusManager
+from .milvus_writer import MilvusWriter
+from .models import User
+from .parent_chunk_store import ParentChunkStore
+from .schemas import (
     AuthResponse,
     ChatRequest,
     ChatResponse,
@@ -36,7 +36,7 @@ from schemas import (
     SessionListResponse,
     SessionMessagesResponse,
 )
-from upload_jobs import DELETE_STEPS, delete_job_manager, upload_job_manager
+from .upload_jobs import DELETE_STEPS, delete_job_manager, upload_job_manager
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR.parent / "data"
@@ -194,6 +194,7 @@ def _is_supported_document(filename: str) -> bool:
         file_lower.endswith(".pdf")
         or file_lower.endswith((".docx", ".doc"))
         or file_lower.endswith((".xlsx", ".xls"))
+        or file_lower.endswith((".md", ".txt", ".py", ".js", ".css", ".html", ".yml", ".yaml", ".toml", ".json"))
     )
 
 
@@ -354,7 +355,7 @@ async def upload_document_async(
     if not filename:
         raise HTTPException(status_code=400, detail="文件名不能为空")
     if not _is_supported_document(filename):
-        raise HTTPException(status_code=400, detail="仅支持 PDF、Word 和 Excel 文档")
+        raise HTTPException(status_code=400, detail="仅支持 PDF、Word、Excel、Markdown、文本和源码类文档")
 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     job = upload_job_manager.create_job(filename)
@@ -434,8 +435,9 @@ async def upload_document(file: UploadFile = File(...), _: User = Depends(requir
             file_lower.endswith(".pdf")
             or file_lower.endswith((".docx", ".doc"))
             or file_lower.endswith((".xlsx", ".xls"))
+            or file_lower.endswith((".md", ".txt", ".py", ".js", ".css", ".html", ".yml", ".yaml", ".toml", ".json"))
         ):
-            raise HTTPException(status_code=400, detail="仅支持 PDF、Word 和 Excel 文档")
+            raise HTTPException(status_code=400, detail="仅支持 PDF、Word、Excel、Markdown、文本和源码类文档")
 
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         milvus_manager.init_collection()

@@ -1,12 +1,13 @@
 from typing import Literal, TypedDict, List, Optional
 import os
+import re
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 
-from rag_utils import retrieve_documents, step_back_expand, generate_hypothetical_document
-from tools import emit_rag_step
+from .rag_utils import retrieve_documents, step_back_expand, generate_hypothetical_document
+from .tools import emit_rag_payload, emit_rag_step
 
 load_dotenv()
 
@@ -58,6 +59,8 @@ GRADE_PROMPT = (
     "If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. \n"
     "Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."
 )
+
+EXPLICIT_KB_PATTERN = re.compile(r"知识库|文档|资料|基于|根据上传|检索|项目|代码|README|实现|流程", re.IGNORECASE)
 
 
 class GradeDocuments(BaseModel):
@@ -125,6 +128,13 @@ def retrieve_initial(state: RAGState) -> RAGState:
         ),
     )
     emit_rag_step("✅", f"检索完成，找到 {len(results)} 个片段", f"模式: {retrieve_meta.get('retrieval_mode', 'hybrid')}")
+    emit_rag_payload({
+        "type": "retrieved_docs",
+        "stage": "initial",
+        "query": query,
+        "docs": results,
+        "meta": retrieve_meta,
+    })
     rag_trace = {
         "tool_used": True,
         "tool_name": "search_knowledge_base",
@@ -134,6 +144,7 @@ def retrieve_initial(state: RAGState) -> RAGState:
         "initial_retrieved_chunks": results,
         "retrieval_stage": "initial",
         "rerank_enabled": retrieve_meta.get("rerank_enabled"),
+        "rerank_attempted": retrieve_meta.get("rerank_attempted"),
         "rerank_applied": retrieve_meta.get("rerank_applied"),
         "rerank_model": retrieve_meta.get("rerank_model"),
         "rerank_endpoint": retrieve_meta.get("rerank_endpoint"),
@@ -158,6 +169,16 @@ def retrieve_initial(state: RAGState) -> RAGState:
 def grade_documents_node(state: RAGState) -> RAGState:
     grader = _get_grader_model()
     emit_rag_step("📊", "正在评估文档相关性...")
+    if state.get("docs") and EXPLICIT_KB_PATTERN.search(state.get("question", "")):
+        grade_update = {
+            "grade_score": "assumed_yes_explicit_kb",
+            "grade_route": "generate_answer",
+            "rewrite_needed": False,
+        }
+        rag_trace = state.get("rag_trace", {}) or {}
+        rag_trace.update(grade_update)
+        emit_rag_step("✅", "显式知识库问题，跳过慢速评分", "已展示召回片段，直接基于片段回答")
+        return {"route": "generate_answer", "rag_trace": rag_trace}
     if not grader:
         grade_update = {
             "grade_score": "unknown",
@@ -170,10 +191,18 @@ def grade_documents_node(state: RAGState) -> RAGState:
     question = state["question"]
     context = state.get("context", "")
     prompt = GRADE_PROMPT.format(question=question, context=context)
-    response = grader.with_structured_output(GradeDocuments).invoke(
-        [{"role": "user", "content": prompt}]
-    )
-    score = (response.binary_score or "").strip().lower()
+    try:
+        # 尝试 structured output（对于支持的模型）
+        response = grader.with_structured_output(GradeDocuments).invoke(
+            [{"role": "user", "content": prompt}]
+        )
+        score = (response.binary_score or "").strip().lower()
+    except Exception:
+        # 降级：普通调用后手工解析
+        response = grader.invoke([{"role": "user", "content": prompt}])
+        content = response.content if hasattr(response, 'content') else str(response)
+        score = "yes" if "yes" in content.lower() else "no"
+    
     route = "generate_answer" if score == "yes" else "rewrite_question"
     if route == "generate_answer":
         emit_rag_step("✅", "文档相关性评估通过", f"评分: {score}")
@@ -248,6 +277,7 @@ def retrieve_expanded(state: RAGState) -> RAGState:
     results: List[dict] = []
     rerank_applied_any = False
     rerank_enabled_any = False
+    rerank_attempted_any = False
     rerank_model = None
     rerank_endpoint = None
     rerank_errors = []
@@ -276,6 +306,7 @@ def retrieve_expanded(state: RAGState) -> RAGState:
         )
         rerank_applied_any = rerank_applied_any or bool(hyde_meta.get("rerank_applied"))
         rerank_enabled_any = rerank_enabled_any or bool(hyde_meta.get("rerank_enabled"))
+        rerank_attempted_any = rerank_attempted_any or bool(hyde_meta.get("rerank_attempted"))
         rerank_model = rerank_model or hyde_meta.get("rerank_model")
         rerank_endpoint = rerank_endpoint or hyde_meta.get("rerank_endpoint")
         if hyde_meta.get("rerank_error"):
@@ -305,6 +336,7 @@ def retrieve_expanded(state: RAGState) -> RAGState:
         )
         rerank_applied_any = rerank_applied_any or bool(step_meta.get("rerank_applied"))
         rerank_enabled_any = rerank_enabled_any or bool(step_meta.get("rerank_enabled"))
+        rerank_attempted_any = rerank_attempted_any or bool(step_meta.get("rerank_attempted"))
         rerank_model = rerank_model or step_meta.get("rerank_model")
         rerank_endpoint = rerank_endpoint or step_meta.get("rerank_endpoint")
         if step_meta.get("rerank_error"):
@@ -334,6 +366,29 @@ def retrieve_expanded(state: RAGState) -> RAGState:
 
     context = _format_docs(deduped)
     emit_rag_step("✅", f"扩展检索完成，共 {len(deduped)} 个片段")
+    emit_rag_payload({
+        "type": "retrieved_docs",
+        "stage": "expanded",
+        "query": state.get("expanded_query") or state["question"],
+        "docs": deduped,
+        "meta": {
+            "expansion_type": strategy,
+            "retrieval_mode": retrieval_mode,
+            "candidate_k": candidate_k,
+            "leaf_retrieve_level": leaf_retrieve_level,
+            "rerank_enabled": rerank_enabled_any,
+            "rerank_attempted": rerank_attempted_any,
+            "rerank_applied": rerank_applied_any,
+            "rerank_model": rerank_model,
+            "rerank_endpoint": rerank_endpoint,
+            "rerank_error": "; ".join(rerank_errors) if rerank_errors else None,
+            "auto_merge_enabled": auto_merge_enabled,
+            "auto_merge_applied": auto_merge_applied,
+            "auto_merge_threshold": auto_merge_threshold,
+            "auto_merge_replaced_chunks": auto_merge_replaced_chunks,
+            "auto_merge_steps": auto_merge_steps,
+        },
+    })
     rag_trace = state.get("rag_trace", {}) or {}
     rag_trace.update({
         "expanded_query": state.get("expanded_query") or state["question"],
@@ -353,6 +408,7 @@ def retrieve_expanded(state: RAGState) -> RAGState:
         "candidate_k": candidate_k,
         "leaf_retrieve_level": leaf_retrieve_level,
         "auto_merge_enabled": auto_merge_enabled,
+        "rerank_attempted": rerank_attempted_any,
         "auto_merge_applied": auto_merge_applied,
         "auto_merge_threshold": auto_merge_threshold,
         "auto_merge_replaced_chunks": auto_merge_replaced_chunks,

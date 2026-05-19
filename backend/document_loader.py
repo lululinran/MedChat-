@@ -1,5 +1,6 @@
 """文档加载和分片服务"""
 import os
+from pathlib import Path
 from typing import Dict, List
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, UnstructuredExcelLoader
@@ -7,6 +8,19 @@ from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, Un
 
 class DocumentLoader:
     """文档加载和分片服务"""
+
+    TEXT_EXTENSIONS = {
+        ".md": "Markdown",
+        ".txt": "Text",
+        ".py": "Python",
+        ".js": "JavaScript",
+        ".css": "CSS",
+        ".html": "HTML",
+        ".yml": "YAML",
+        ".yaml": "YAML",
+        ".toml": "TOML",
+        ".json": "JSON",
+    }
 
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
         # 保留原有参数以兼容外部调用；默认启用三层滑动窗口分块。
@@ -125,6 +139,10 @@ class DocumentLoader:
         :return: 分片后的文档列表
         """
         file_lower = filename.lower()
+        suffix = Path(filename).suffix.lower()
+
+        if suffix in self.TEXT_EXTENSIONS:
+            return self.load_text_document(file_path, filename, self.TEXT_EXTENSIONS[suffix])
 
         if file_lower.endswith(".pdf"):
             doc_type = "PDF"
@@ -160,6 +178,29 @@ class DocumentLoader:
         except Exception as e:
             raise Exception(f"处理文档失败: {str(e)}")
 
+    def load_text_document(self, file_path: str, filename: str, doc_type: str | None = None) -> list[dict]:
+        """加载纯文本/源码类文档并执行三级分块。"""
+        path = Path(file_path)
+        inferred_type = doc_type or self.TEXT_EXTENSIONS.get(path.suffix.lower(), "Text")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            raise Exception(f"处理文本文件失败: {str(e)}")
+
+        base_doc = {
+            "filename": filename,
+            "file_path": str(path),
+            "file_type": inferred_type,
+            "page_number": 0,
+        }
+        return self._split_page_to_three_levels(
+            text=text.strip(),
+            base_doc=base_doc,
+            page_global_chunk_idx=0,
+        )
+
     def load_documents_from_folder(self, folder_path: str) -> list[dict]:
         """
         从文件夹加载所有文档并分片
@@ -170,7 +211,13 @@ class DocumentLoader:
 
         for filename in os.listdir(folder_path):
             file_lower = filename.lower()
-            if not (file_lower.endswith(".pdf") or file_lower.endswith((".docx", ".doc")) or file_lower.endswith((".xlsx", ".xls"))):
+            suffix = Path(filename).suffix.lower()
+            if not (
+                file_lower.endswith(".pdf")
+                or file_lower.endswith((".docx", ".doc"))
+                or file_lower.endswith((".xlsx", ".xls"))
+                or suffix in self.TEXT_EXTENSIONS
+            ):
                 continue
 
             file_path = os.path.join(folder_path, filename)

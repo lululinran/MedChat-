@@ -56,6 +56,7 @@ class RagTrace(BaseModel):
     rewrite_strategy: Optional[str] = None
     rewrite_query: Optional[str] = None
     rerank_enabled: Optional[bool] = None
+    rerank_attempted: Optional[bool] = None
     rerank_applied: Optional[bool] = None
     rerank_model: Optional[str] = None
     rerank_endpoint: Optional[str] = None

@@ -5,9 +5,9 @@ import json
 import requests
 from dotenv import load_dotenv
 
-from milvus_client import MilvusManager
-from embedding import embedding_service as _embedding_service
-from parent_chunk_store import ParentChunkStore
+from .milvus_client import MilvusManager
+from .embedding import embedding_service as _embedding_service
+from .parent_chunk_store import ParentChunkStore
 from langchain.chat_models import init_chat_model
 
 load_dotenv()
@@ -109,6 +109,7 @@ def _rerank_documents(query: str, docs: List[dict], top_k: int) -> Tuple[List[di
     docs_with_rank = [{**doc, "rrf_rank": i} for i, doc in enumerate(docs, 1)]
     meta: Dict[str, Any] = {
         "rerank_enabled": bool(RERANK_MODEL and RERANK_API_KEY and RERANK_BINDING_HOST),
+        "rerank_attempted": False,
         "rerank_applied": False,
         "rerank_model": RERANK_MODEL,
         "rerank_endpoint": _get_rerank_endpoint(),
@@ -131,7 +132,7 @@ def _rerank_documents(query: str, docs: List[dict], top_k: int) -> Tuple[List[di
         "Authorization": f"Bearer {RERANK_API_KEY}",
     }
     try:
-        meta["rerank_applied"] = True
+        meta["rerank_attempted"] = True
         response = requests.post(
             meta["rerank_endpoint"],
             headers=headers,
@@ -154,6 +155,7 @@ def _rerank_documents(query: str, docs: List[dict], top_k: int) -> Tuple[List[di
                 reranked.append(doc)
 
         if reranked:
+            meta["rerank_applied"] = True
             return reranked[:top_k], meta
 
         meta["rerank_error"] = "empty_rerank_results"
@@ -284,6 +286,7 @@ def retrieve_documents(query: str, top_k: int = 5) -> Dict[str, Any]:
                 "docs": [],
                 "meta": {
                     "rerank_enabled": bool(RERANK_MODEL and RERANK_API_KEY and RERANK_BINDING_HOST),
+                    "rerank_attempted": False,
                     "rerank_applied": False,
                     "rerank_model": RERANK_MODEL,
                     "rerank_endpoint": _get_rerank_endpoint(),
