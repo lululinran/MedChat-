@@ -25,7 +25,7 @@
             </div>
             <div class="header-right">
                 <button v-if="isAuthenticated" @click="showUserMenu = !showUserMenu" class="user-btn">
-                    <i class="fas fa-user-circle"></i> {{ currentUser?.username }}
+                    <i class="fas fa-user-circle"></i> {{ currentUser && currentUser.username }}
                 </button>
                 <div v-if="showUserMenu && isAuthenticated" class="user-menu">
                     <button @click="handleClearChat" class="menu-item">
@@ -85,25 +85,55 @@
                 </div>
 
                 <div class="sidebar-section">
-                    <h3><i class="fas fa-comments"></i> 聊天记录</h3>
-                    <div class="session-actions">
-                        <button class="tag-btn session-create-btn" @click="createNewSession">
-                            <i class="fas fa-plus"></i> 新建会话
-                        </button>
-                    </div>
-                    <div class="session-list">
-                        <div v-if="sessions.length === 0" class="session-empty">暂无已保存会话</div>
-                        <div v-for="session in sessions" :key="session.session_id" :class="['session-item', { active: session.session_id === currentSessionId }]">
-                            <button class="session-open-btn" @click="openSession(session.session_id)">
-                                <div class="session-title">{{ session.session_id }}</div>
-                                <div class="session-meta">{{ session.message_count }} 条消息 · {{ session.updated_at }}</div>
-                            </button>
-                            <button class="session-delete-btn" @click.stop="deleteSession(session.session_id)" title="删除会话">
-                                <i class="fas fa-trash"></i>
-                            </button>
-                        </div>
-                    </div>
+            <h3><i class="fas fa-file-medical"></i> 我的病例</h3>
+            <div class="upload-section">
+                <label class="upload-btn tag-btn" for="episodic-upload">
+                    <i class="fas fa-upload"></i> 上传病例/就诊记录
+                </label>
+                <input type="file" id="episodic-upload" @change="handleEpisodicUpload" accept=".pdf,.docx,.doc,.xlsx,.xls,.md,.txt" style="display: none;">
+                <p class="upload-hint">支持 PDF、Word、Excel、Markdown、文本文件</p>
+                <div v-if="episodicUploadStatus" class="upload-status">
+                    <i :class="episodicUploadStatus.isComplete ? 'fas fa-check-circle' : 'fas fa-spinner fa-spin'"></i>
+                    {{ episodicUploadStatus.message }}
                 </div>
+            </div>
+        </div>
+
+        <div class="sidebar-section" v-if="currentUser && currentUser.role === 'admin'">
+            <h3><i class="fas fa-book-medical"></i> 药品说明书库</h3>
+            <div class="upload-section">
+                <label class="upload-btn tag-btn" for="semantic-upload">
+                    <i class="fas fa-upload"></i> 上传药品说明书
+                </label>
+                <input type="file" id="semantic-upload" @change="handleSemanticUpload" accept=".pdf,.docx,.doc,.xlsx,.xls,.md,.txt" style="display: none;">
+                <p class="upload-hint">管理员可上传药品说明书和医学文献</p>
+                <div v-if="semanticUploadStatus" class="upload-status">
+                    <i :class="semanticUploadStatus.isComplete ? 'fas fa-check-circle' : 'fas fa-spinner fa-spin'"></i>
+                    {{ semanticUploadStatus.message }}
+                </div>
+            </div>
+        </div>
+
+        <div class="sidebar-section">
+            <h3><i class="fas fa-comments"></i> 聊天记录</h3>
+            <div class="session-actions">
+                <button class="tag-btn session-create-btn" @click="createNewSession">
+                    <i class="fas fa-plus"></i> 新建会话
+                </button>
+            </div>
+            <div class="session-list">
+                <div v-if="sessions.length === 0" class="session-empty">暂无已保存会话</div>
+                <div v-for="session in sessions" :key="session.session_id" :class="['session-item', { active: session.session_id === currentSessionId }]">
+                    <button class="session-open-btn" @click="openSession(session.session_id)">
+                        <div class="session-title">{{ session.session_id }}</div>
+                        <div class="session-meta">{{ session.message_count }} 条消息 · {{ session.updated_at }}</div>
+                    </button>
+                    <button class="session-delete-btn" @click.stop="deleteSession(session.session_id)" title="删除会话">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
 
                 <div class="sidebar-section">
                     <h3><i class="fas fa-lightbulb"></i> 使用提示</h3>
@@ -117,184 +147,85 @@
             </aside>
 
             <!-- Main Chat Area -->
-            <section class="chat-area">
-                <!-- Symptoms Input -->
-                <div class="symptoms-input-box">
-                    <div class="input-label">
-                        <i class="fas fa-search"></i> 描述您的症状或询问
-                    </div>
-                    <textarea 
-                        v-model="userInput" 
-                        @keydown.enter.ctrl="sendMessage"
-                        placeholder="例如：最近几天喉咙痛，吞咽困难，还有点发烧... （Ctrl+Enter 发送）"
-                        class="symptom-input"
-                    ></textarea>
-                    <div class="input-actions">
-                        <button @click="userInput = ''" class="btn-text" v-if="userInput.length > 0">
-                            <i class="fas fa-times"></i> 清空
-                        </button>
-                        <button @click="sendMessage" class="btn-primary" :disabled="isLoading || !userInput.trim()">
-                            <i class="fas fa-paper-plane"></i> 
-                            {{ isLoading ? '分析中...' : '分析症状' }}
-                        </button>
-                    </div>
-                </div>
-
+            <section :class="['chat-area', { 'has-messages': messages.length > 0 }]">
                 <!-- Messages -->
                 <div class="messages-container" ref="messagesContainer">
-                    <div v-if="messages.length === 0" class="empty-state">
-                        <div class="empty-icon"><i class="fas fa-stethoscope"></i></div>
-                        <h3>欢迎使用医疗知识助理</h3>
-                        <p>请描述您的症状或提出医疗相关问题，我会为您提供专业的建议和信息。</p>
-                    </div>
-
                     <div v-for="(msg, idx) in messages" :key="idx" :class="['message', msg.role]">
                         <div class="message-avatar">
                             <i :class="msg.role === 'user' ? 'fas fa-user' : 'fas fa-heartbeat'"></i>
                         </div>
                         <div class="message-content">
-                            <div class="message-text" v-html="parseMarkdown(msg.content)"></div>
+                            <!-- User Message -->
+                            <div v-if="msg.role === 'user'" class="message-text" v-html="parseMarkdown(msg.content)"></div>
 
-                            <!-- RAG Process Panel -->
-                            <div v-if="msg.role === 'assistant' && ((msg.ragSteps && msg.ragSteps.length > 0) || msg.ragTrace || (msg.retrievedDocs && msg.retrievedDocs.length > 0))" class="process-panel">
-                                <div class="panel-header">
-                                    <button @click="msg.processExpanded = !msg.processExpanded" class="expand-btn">
-                                        <i :class="msg.processExpanded ? 'fas fa-chevron-down' : 'fas fa-chevron-right'"></i>
-                                        查询过程
-                                        <span class="process-count" v-if="msg.ragSteps && msg.ragSteps.length > 0">{{ msg.ragSteps.length }} 步</span>
-                                        <span class="process-count" v-if="msg.retrievedDocs && msg.retrievedDocs.length > 0">{{ msg.retrievedDocs.reduce((sum, block) => sum + (block.docs ? block.docs.length : 0), 0) }} 个片段</span>
-                                        <span v-if="msg.streaming" class="streaming-badge">流式输出中</span>
-                                    </button>
-                                </div>
-                                <div v-if="msg.processExpanded" class="process-body">
-                                    <div v-if="msg.ragSteps && msg.ragSteps.length > 0" class="process-steps">
-                                        <div v-for="(step, sidx) in msg.ragSteps" :key="sidx" class="process-step-item">
-                                            <span class="step-icon">{{ step.icon }}</span>
-                                            <div class="step-main">
-                                                <div class="step-line">
-                                                    <div class="step-label">{{ step.step_index }}. {{ step.label }}</div>
-                                                    <div class="step-meta">
-                                                        <span v-if="step.timestamp">{{ formatTimestamp(step.timestamp) }}</span>
-                                                        <span v-if="step.delta_ms !== null && step.delta_ms !== undefined">+{{ step.delta_ms }} ms</span>
-                                                        <span v-if="step.elapsed_ms !== null && step.elapsed_ms !== undefined">累计 {{ step.elapsed_ms }} ms</span>
+                            <!-- Assistant Message with Retrieval Bubble -->
+                            <template v-if="msg.role === 'assistant'">
+                                <!-- Retrieval Process Bubble - Shows before content or alongside -->
+                                <div v-if="msg.retrievalBubble && (msg.retrievalBubble.steps && msg.retrievalBubble.steps.length > 0)" class="retrieval-bubble">
+                                    <div class="retrieval-bubble-header" @click="msg.retrievalBubbleExpanded = !msg.retrievalBubbleExpanded">
+                                        <div class="retrieval-bubble-title">
+                                            <i class="fas fa-search retrieval-icon"></i>
+                                            <span>知识库检索</span>
+                                            <span class="retrieval-progress" v-if="msg.retrievalBubble.isComplete">
+                                                <i class="fas fa-check-circle"></i> 完成
+                                            </span>
+                                            <span class="retrieval-progress active" v-else>
+                                                <i class="fas fa-spinner fa-spin"></i> 检索中
+                                            </span>
+                                        </div>
+                                        <button class="retrieval-bubble-toggle">
+                                            <i :class="msg.retrievalBubbleExpanded ? 'fas fa-chevron-up' : 'fas fa-chevron-down'"></i>
+                                        </button>
+                                    </div>
+                                    <div v-if="msg.retrievalBubbleExpanded" class="retrieval-bubble-body">
+                                        <div v-for="(step, sidx) in msg.retrievalBubble.steps" :key="sidx" class="retrieval-step-item" :class="{ 'is-active': step.isActive, 'is-complete': step.isComplete }">
+                                            <div class="retrieval-step-indicator">
+                                                <i v-if="step.isComplete" class="fas fa-check-circle"></i>
+                                                <i v-else-if="step.isActive" class="fas fa-spinner fa-spin"></i>
+                                                <i v-else class="far fa-circle"></i>
+                                            </div>
+                                            <div class="retrieval-step-content">
+                                                <div class="retrieval-step-label">{{ step.label }}</div>
+                                                <div v-if="step.description" class="retrieval-step-desc">{{ step.description }}</div>
+                                                <div v-if="step.details && step.details.length > 0" class="retrieval-step-details">
+                                                    <div v-for="(detail, didx) in step.details" :key="didx" class="retrieval-detail-item">
+                                                        <span class="detail-label">{{ detail.label }}:</span>
+                                                        <span class="detail-value">{{ detail.value }}</span>
+                                                        <div v-if="detail.preview" class="detail-preview">{{ detail.preview }}</div>
                                                     </div>
-                                                </div>
-                                                <div v-if="step.detail" class="step-detail">{{ step.detail }}</div>
-                                                <div v-if="step.layer === 'entity' && step.items && step.items.length > 0" class="step-tags">
-                                                    <span v-for="(item, iidx) in step.items.slice(0, 8)" :key="iidx" class="step-tag">{{ item }}</span>
-                                                </div>
-                                                <div v-if="step.layer === 'relation' && step.relation" class="step-detail step-detail-compact">
-                                                    关系模板：{{ step.relation }}
-                                                </div>
-                                                <div v-if="step.layer === 'evidence' && step.hits && step.hits.length > 0" class="evidence-list">
-                                                    <div v-for="(hit, hidx) in step.hits.slice(0, 5)" :key="hidx" class="evidence-item">
-                                                        <div class="evidence-title">证据 {{ hidx + 1 }}</div>
-                                                        <div class="evidence-text">{{ hit.result }}</div>
-                                                    </div>
-                                                    <div v-if="step.source_entities && step.source_entities.length > 0" class="step-detail step-detail-compact">
-                                                        来源实体：{{ step.source_entities.slice(0, 8).join('、') }}
-                                                    </div>
-                                                    <details v-if="step.evidence_sources && step.evidence_sources.length > 0" class="evidence-json-details">
-                                                        <summary>原始 JSON</summary>
-                                                        <div v-for="(source, sidx) in step.evidence_sources" :key="sidx" class="evidence-json-block">
-                                                            <div class="evidence-json-title">{{ source.entity }}</div>
-                                                            <pre class="evidence-json-pre">{{ formatJson(source.records) }}</pre>
-                                                        </div>
-                                                    </details>
                                                 </div>
                                             </div>
                                         </div>
-                                    </div>
-
-                                    <div v-if="msg.ragTrace" class="trace-summary">
-                                        <div class="trace-item" v-for="entry in getTraceEntries(msg.ragTrace)" :key="entry.key">
-                                            <span class="trace-key">{{ entry.key }}</span>
-                                            <span class="trace-value">{{ formatTraceValue(entry.value) }}</span>
-                                        </div>
-                                    </div>
-
-                                    <div v-if="msg.retrievedDocs && msg.retrievedDocs.length > 0" class="retrieved-docs-panel">
-                                        <div v-for="(block, bidx) in msg.retrievedDocs" :key="bidx" class="retrieved-docs-block">
-                                            <div class="retrieved-docs-header">
-                                                <span class="retrieved-docs-title">{{ formatStageLabel(block.stage) }}</span>
-                                                <span class="retrieved-docs-meta">{{ block.docs.length }} 个片段</span>
-                                            </div>
-                                            <div class="retrieved-docs-query" v-if="block.query">查询：{{ block.query }}</div>
-                                            <div v-for="(doc, didx) in block.docs" :key="didx" class="retrieved-doc-item">
-                                                <div class="doc-card">
-                                                    <div class="doc-card-header">
-                                                        <span class="doc-index">片段 {{ didx + 1 }}</span>
-                                                        <span class="doc-source">{{ doc.filename }}</span>
-                                                    </div>
-                                                    <div class="doc-meta">
-                                                        P{{ doc.page_number ?? 'n/a' }}
-                                                        · score {{ doc.score ?? 'n/a' }}
-                                                        · rank {{ doc.rrf_rank ?? 'n/a' }}
-                                                        <span v-if="doc.rerank_score !== undefined && doc.rerank_score !== null"> · rerank {{ doc.rerank_score }}</span>
-                                                    </div>
-                                                    <div class="doc-text">{{ doc.text || '该片段没有文本内容' }}</div>
-                                                    <details class="doc-json-details">
-                                                        <summary>原始 JSON</summary>
-                                                        <pre class="evidence-json-pre">{{ formatJson(doc) }}</pre>
-                                                    </details>
-                                                </div>
-                                            </div>
+                                        <div v-if="msg.retrievalBubble.summary" class="retrieval-summary">
+                                            <i class="fas fa-info-circle"></i>
+                                            {{ msg.retrievalBubble.summary }}
                                         </div>
                                     </div>
                                 </div>
-                            </div>
 
-                            <!-- Search Results Panel -->
-                            <div v-if="msg.role === 'assistant' && msg.searchResults && msg.searchResults.length > 0" class="search-results-panel">
-                                <div class="panel-header">
-                                    <button @click="msg.resultsExpanded = !msg.resultsExpanded" class="expand-btn">
-                                        <i :class="msg.resultsExpanded ? 'fas fa-chevron-down' : 'fas fa-chevron-right'"></i>
-                                        相关疾病 ({{ msg.searchResults.length }})
-                                    </button>
-                                </div>
-                                <div v-if="msg.resultsExpanded" class="search-results">
-                                    <div v-for="(result, ridx) in msg.searchResults.slice(0, 5)" :key="ridx" class="result-item">
-                                        <div class="result-title">{{ result.title }}</div>
-                                        <div class="result-excerpt">{{ result.excerpt }}</div>
+                                <!-- LLM Response Text -->
+                                <div class="message-text" v-html="parseMarkdown(msg.content)"></div>
+
+                                <!-- References/Retrieved Docs (Collapsed by default when streaming) -->
+                                <div v-if="msg.retrievedDocs && msg.retrievedDocs.length > 0" class="references-bubble">
+                                    <div class="references-header" @click="msg.refsExpanded = !msg.refsExpanded">
+                                        <i class="fas fa-file-alt"></i>
+                                        <span>参考文档 ({{ msg.retrievedDocs.reduce((sum, b) => sum + (b.docs ? b.docs.length : 0), 0) }})</span>
+                                        <i :class="msg.refsExpanded ? 'fas fa-chevron-up' : 'fas fa-chevron-down'"></i>
+                                    </div>
+                                    <div v-if="msg.refsExpanded" class="references-body">
+                                        <div v-for="(doc, didx) in msg.retrievedDocs[0] && msg.retrievedDocs[0].docs && msg.retrievedDocs[0].docs.slice(0, 3)" :key="didx" class="reference-item">
+                                            <div class="ref-source">{{ doc.filename }} (P{{ doc.page_number !== undefined && doc.page_number !== null ? doc.page_number : 'n/a' }})</div>
+                                            <div class="ref-text">{{ (doc.text || '').substring(0, 150) }}...</div>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-
-                            <!-- References Panel -->
-                            <div v-if="msg.role === 'assistant' && msg.references && msg.references.length > 0" class="references-panel">
-                                <div class="panel-header">
-                                    <button @click="msg.referencesExpanded = !msg.referencesExpanded" class="expand-btn">
-                                        <i :class="msg.referencesExpanded ? 'fas fa-chevron-down' : 'fas fa-chevron-right'"></i>
-                                        参考文献 ({{ msg.references.length }})
-                                    </button>
-                                </div>
-                                <div v-if="msg.referencesExpanded" class="references">
-                                    <div v-for="(ref, ridx) in msg.references" :key="ridx" class="reference-item">
-                                        <span class="ref-source">{{ ref.source }}</span>
-                                        <span class="ref-text">{{ ref.text.substring(0, 100) }}...</span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Relationships Panel -->
-                            <div v-if="msg.role === 'assistant' && msg.relationships && msg.relationships.length > 0" class="relationships-panel">
-                                <div class="panel-header">
-                                    <button @click="msg.relationshipsExpanded = !msg.relationshipsExpanded" class="expand-btn">
-                                        <i :class="msg.relationshipsExpanded ? 'fas fa-chevron-down' : 'fas fa-chevron-right'"></i>
-                                        相关信息 ({{ msg.relationships.length }})
-                                    </button>
-                                </div>
-                                <div v-if="msg.relationshipsExpanded" class="relationships">
-                                    <div v-for="(rel, ridx) in msg.relationships" :key="ridx" class="relationship-item">
-                                        <span class="rel-type">{{ rel.type }}</span>
-                                        <span class="rel-value">{{ rel.value }}</span>
-                                    </div>
-                                </div>
-                            </div>
+                            </template>
                         </div>
                     </div>
 
-                    <div v-if="isLoading" class="message assistant">
+                    <!-- Loading Indicator -->
+                    <div v-if="isLoading" class="message assistant loading-message">
                         <div class="message-avatar">
                             <i class="fas fa-heartbeat"></i>
                         </div>
@@ -303,6 +234,28 @@
                                 <span></span><span></span><span></span>
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Input Box - Centered when empty, fixed bottom when has messages -->
+                <div class="symptoms-input-box">
+                    <div class="input-label" v-if="messages.length === 0">
+                        <i class="fas fa-search"></i> 描述您的症状或询问
+                    </div>
+                    <textarea
+                        v-model="userInput"
+                        @keydown.enter.ctrl="sendMessage"
+                        :placeholder="messages.length === 0 ? '输入您想了解的医疗问题...' : '继续输入... (Ctrl+Enter 发送)'"
+                        class="symptom-input"
+                    ></textarea>
+                    <div class="input-actions">
+                        <button @click="userInput = ''" class="btn-text" v-if="userInput.length > 0">
+                            <i class="fas fa-times"></i> 清空
+                        </button>
+                        <button @click="sendMessage" class="btn-primary" :disabled="isLoading || !userInput.trim()">
+                            <i class="fas fa-paper-plane"></i>
+                            {{ isLoading ? '分析中...' : '发送' }}
+                        </button>
                     </div>
                 </div>
             </section>

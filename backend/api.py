@@ -37,6 +37,7 @@ from .schemas import (
     SessionMessagesResponse,
 )
 from .upload_jobs import DELETE_STEPS, delete_job_manager, upload_job_manager
+from .dual_vector_store import insert_episodic_memory, insert_semantic_memory
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR.parent / "data"
@@ -509,3 +510,108 @@ async def delete_document(filename: str, _: User = Depends(require_admin)):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除文档失败: {str(e)}")
+
+
+# === 新的双向量数据库上传接口 ===
+
+async def _process_upload_to_memory(job_id: str, file_path: str, filename: str, memory_type: str, user_id: str) -> None:
+    """后台处理上传到指定的记忆库"""
+    try:
+        upload_job_manager.complete_step(job_id, "upload", "文件已保存到服务器")
+        
+        # 解析文档
+        upload_job_manager.update_step(job_id, "parse", 5, "running", "正在解析文档")
+        new_docs = loader.load_document(file_path, filename)
+        if not new_docs:
+            raise ValueError("文档处理失败，未能提取内容")
+        
+        # 准备分块
+        chunks = [
+            {
+                "content": doc.get("text", ""),
+                "source": filename,
+                "filename": filename
+            }
+            for doc in new_docs
+        ]
+        
+        upload_job_manager.complete_step(job_id, "parse", f"解析完成：{len(chunks)} 个分块")
+        
+        # 写入向量库
+        upload_job_manager.update_step(job_id, "vector_store", 10, "running", f"正在写入{memory_type}")
+        
+        if memory_type == "情景记忆":
+            insert_episodic_memory(chunks, user_id)
+        else:
+            insert_semantic_memory(chunks, user_id)
+        
+        upload_job_manager.complete_step(job_id, "vector_store", f"成功写入{memory_type}：{len(chunks)} 个分块")
+        upload_job_manager.complete_job(job_id, f"成功上传 {filename} 到{memory_type}")
+    except Exception as e:
+        upload_job_manager.fail_job(job_id, "parse", str(e))
+
+
+@router.post("/documents/episodic/upload", response_model=DocumentUploadStartResponse)
+async def upload_episodic_memory(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """上传用户病例、就诊记录、检查报告到情景记忆库"""
+    filename = file.filename or ""
+    if not filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    if not _is_supported_document(filename):
+        raise HTTPException(status_code=400, detail="仅支持 PDF、Word、Excel、Markdown、文本类文档")
+
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    job = upload_job_manager.create_job(filename)
+    file_path = UPLOAD_DIR / filename
+
+    try:
+        upload_job_manager.update_step(job["job_id"], "upload", 1, "running", "正在保存文件到服务器")
+        await _save_upload_file(file, file_path)
+        upload_job_manager.complete_step(job["job_id"], "upload", "文件已上传，等待后台处理")
+    except Exception as e:
+        upload_job_manager.fail_job(job["job_id"], "upload", f"文件保存失败: {e}")
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {e}")
+
+    background_tasks.add_task(_process_upload_to_memory, job["job_id"], str(file_path), filename, "情景记忆", current_user.username)
+    return DocumentUploadStartResponse(
+        job_id=job["job_id"],
+        filename=filename,
+        message="病例文件已上传，正在后台处理并存入您的个人记忆库",
+    )
+
+
+@router.post("/documents/semantic/upload", response_model=DocumentUploadStartResponse)
+async def upload_semantic_memory(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    _: User = Depends(require_admin),
+):
+    """上传药品说明书、医学文献到语义记忆库（管理员）"""
+    filename = file.filename or ""
+    if not filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    if not _is_supported_document(filename):
+        raise HTTPException(status_code=400, detail="仅支持 PDF、Word、Excel、Markdown、文本类文档")
+
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    job = upload_job_manager.create_job(filename)
+    file_path = UPLOAD_DIR / filename
+
+    try:
+        upload_job_manager.update_step(job["job_id"], "upload", 1, "running", "正在保存文件到服务器")
+        await _save_upload_file(file, file_path)
+        upload_job_manager.complete_step(job["job_id"], "upload", "文件已上传，等待后台处理")
+    except Exception as e:
+        upload_job_manager.fail_job(job["job_id"], "upload", f"文件保存失败: {e}")
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {e}")
+
+    background_tasks.add_task(_process_upload_to_memory, job["job_id"], str(file_path), filename, "语义记忆", "global")
+    return DocumentUploadStartResponse(
+        job_id=job["job_id"],
+        filename=filename,
+        message="医学文档已上传，正在后台处理并存入系统记忆库",
+    )

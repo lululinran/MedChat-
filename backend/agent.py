@@ -8,8 +8,10 @@ from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage, AIMessage, AIMessageChunk, SystemMessage, message_to_dict, messages_from_dict
 from .tools import (
     get_current_weather, search_knowledge_base, search_medical_graph,
-    get_last_rag_context, reset_tool_call_guards, set_rag_step_queue
+    get_last_rag_context, reset_tool_call_guards, set_rag_step_queue,
+    emit_rag_step
 )
+from .intelligent_retrieval import get_intelligent_retrieval
 from datetime import datetime
 from .cache import cache
 from .database import SessionLocal
@@ -316,16 +318,7 @@ def _is_medical_query(user_text: str) -> bool:
 
 
 def _should_prefetch_knowledge_base(user_text: str, graph_outputs: list[str]) -> bool:
-    text = user_text or ""
-    if any(keyword in text for keyword in _KNOWLEDGE_BASE_KEYWORDS):
-        return True
-
-    # For structured medical questions, a graph hit is the primary source. Fall back to
-    # semantic retrieval only when the graph did not produce usable evidence.
-    if _is_medical_query(text):
-        return not graph_outputs
-
-    return False
+    return True
 
 
 def _extract_medical_entity(user_text: str) -> str:
@@ -364,27 +357,73 @@ def _select_graph_intents(user_text: str) -> list[str]:
 
 def _prefetch_medical_context(user_text: str) -> str:
     """Run deterministic pre-retrieval only when it improves routing clarity."""
+    # 使用智能检索器进行检索
+    retriever = get_intelligent_retrieval()
+    
+    try:
+        # 执行智能检索
+        retrieval_result = retriever.retrieve(user_text)
+        
+        # 检查是否有检索结果
+        results = retrieval_result['results']
+        has_results = any(len(items) > 0 for items in results.values())
+        
+        if not has_results:
+            return ""
+        
+        # 格式化检索结果
+        formatted_results = retriever.format_results(retrieval_result)
+        
+        # 构建最终上下文
+        return (
+            "你已经获得以下预检索上下文，这些内容已经是工具检索结果。请只基于这些内容回答，并在必要时说明不确定性。\n"
+            "检索策略: " + retrieval_result['strategy'] + "\n"
+            "问题类型: " + retrieval_result['question_type'] + "\n\n"
+            "如果上下文包含“医疗知识图谱”章节，说明知识图谱本轮已经可用且已返回证据，禁止说“知识图谱不可用/暂时不可用”。\n"
+            "如果检索结果与用户问题主题不匹配，请明确说明知识库未检索到相关资料，不要用通用知识补全成确定答案。\n"
+            "不要再次调用任何工具，直接基于上下文作答。\n\n"
+            + formatted_results
+        )
+    
+    except Exception as exc:
+        emit_rag_step('❌', '智能检索失败', str(exc))
+        # 降级到原有逻辑
+        return _prefetch_medical_context_fallback(user_text)
+
+
+def _prefetch_medical_context_fallback(user_text: str) -> str:
+    """降级检索逻辑 - 当智能检索失败时使用"""
     sections: list[str] = []
     graph_outputs: list[str] = []
 
     if _is_medical_query(user_text):
         entity = _extract_medical_entity(user_text)
         intents = _select_graph_intents(user_text)
+        
+        if entity and intents:
+            emit_rag_step('🧬', '开始知识图谱检索', f'识别实体: {entity}')
+        
         for intent in intents:
+            emit_rag_step('🔍', '查询知识图谱', f'{entity} → {intent}')
             try:
                 graph_output = search_medical_graph.invoke({"entity": entity, "intent": intent})
+                emit_rag_step('✅', '知识图谱查询完成', f'{entity} · {intent}')
             except Exception as exc:
+                emit_rag_step('❌', '知识图谱查询失败', str(exc))
                 graph_output = f"知识图谱查询失败：{exc}"
             if isinstance(graph_output, str) and (
                 "未返回可用结果" in graph_output
                 or "查询失败" in graph_output
                 or "未找到关于" in graph_output
             ):
+                emit_rag_step('ℹ️', '知识图谱无结果', f'{entity} · {intent} 未找到匹配信息')
                 continue
             graph_outputs.append(f"### {entity} · {intent}\n{graph_output}")
+            emit_rag_step('📊', '知识图谱返回结果', f'{entity} · {intent} 找到相关信息')
 
     if graph_outputs:
         sections.append("## 医疗知识图谱\n" + "\n\n".join(graph_outputs))
+        emit_rag_step('📚', '知识图谱检索完成', f'共找到 {len(graph_outputs)} 条结果')
 
     if _should_prefetch_knowledge_base(user_text, graph_outputs):
         try:
@@ -507,7 +546,7 @@ async def chat_with_agent_stream(user_text: str, user_id: str = "default_user", 
     class _RagStepProxy:
         """代理对象：将 emit_rag_step 的原始 step dict 包装后放入统一输出队列。"""
         def put_nowait(self, step):
-            if isinstance(step, dict) and step.get("type") and ("icon" not in step or "label" not in step):
+            if isinstance(step, dict) and step.get("type"):
                 output_queue.put_nowait(step)
             else:
                 output_queue.put_nowait({"type": "rag_step", "step": step})
@@ -523,81 +562,101 @@ async def chat_with_agent_stream(user_text: str, user_id: str = "default_user", 
     full_response = ""
     assistant_additional_kwargs: dict = {}
     assistant_response_metadata: dict = {}
+    retrieval_done = False
 
-    async def _agent_worker():
-        """后台任务：运行 agent 并将内容 chunk 推入输出队列。"""
-        nonlocal messages, full_response, assistant_additional_kwargs, assistant_response_metadata
+    async def _retrieval_task():
+        """执行检索任务，发送检索步骤。"""
+        nonlocal retrieval_done
         try:
-            history_messages = list(messages)
-            human_message = HumanMessage(content=user_text)
-            prefetched_context = await asyncio.to_thread(_prefetch_medical_context, user_text)
-            if prefetched_context:
-                model_messages = history_messages + [SystemMessage(content=prefetched_context), human_message]
-                messages = history_messages + [human_message]
-                async for msg in model.astream(model_messages):
-                    if getattr(msg, "additional_kwargs", None):
-                        assistant_additional_kwargs.update(msg.additional_kwargs)
-                    if getattr(msg, "response_metadata", None):
-                        assistant_response_metadata.update(msg.response_metadata)
-                    content = _message_content_to_text(msg)
-                    if content:
-                        full_response += content
-                        await output_queue.put({"type": "content", "data": content})
-            else:
-                agent_messages = history_messages + [human_message]
-                messages = agent_messages
-                async for msg, metadata in agent.astream(
-                    {"messages": agent_messages},
-                    stream_mode="messages",
-                    config={"recursion_limit": 8},
-                ):
-                    if not isinstance(msg, AIMessageChunk):
-                        continue
-                    if getattr(msg, "tool_call_chunks", None):
-                        continue
-
-                    if getattr(msg, "additional_kwargs", None):
-                        assistant_additional_kwargs.update(msg.additional_kwargs)
-                    if getattr(msg, "response_metadata", None):
-                        assistant_response_metadata.update(msg.response_metadata)
-
-                    content = _message_content_to_text(msg)
-                    if content:
-                        full_response += content
-                        await output_queue.put({"type": "content", "data": content})
-        except Exception as e:
-            await output_queue.put({"type": "error", "data": str(e)})
+            await asyncio.to_thread(_prefetch_medical_context, user_text)
         finally:
-            # 哨兵：通知主循环 agent 已完成
-            await output_queue.put(None)
+            retrieval_done = True
 
-    # 启动后台任务
-    agent_task = asyncio.create_task(_agent_worker())
+    async def _generation_task():
+        """执行生成任务，发送内容。"""
+        nonlocal messages, full_response, assistant_additional_kwargs, assistant_response_metadata
+        
+        await retrieval_task
+        
+        history_messages = list(messages)
+        human_message = HumanMessage(content=user_text)
+        
+        prefetched_context = ""
+        rag_context = get_last_rag_context(clear=False)
+        if rag_context and "context" in rag_context:
+            prefetched_context = rag_context["context"]
+
+        if prefetched_context:
+            model_messages = history_messages + [SystemMessage(content=prefetched_context), human_message]
+            messages = history_messages + [human_message]
+            async for msg in model.astream(model_messages):
+                if getattr(msg, "additional_kwargs", None):
+                    assistant_additional_kwargs.update(msg.additional_kwargs)
+                if getattr(msg, "response_metadata", None):
+                    assistant_response_metadata.update(msg.response_metadata)
+                content = _message_content_to_text(msg)
+                if content:
+                    full_response += content
+                    await output_queue.put({"type": "content", "data": content})
+        else:
+            agent_messages = history_messages + [human_message]
+            messages = agent_messages
+            async for msg, metadata in agent.astream(
+                {"messages": agent_messages},
+                stream_mode="messages",
+                config={"recursion_limit": 8},
+            ):
+                if not isinstance(msg, AIMessageChunk):
+                    continue
+                if getattr(msg, "tool_call_chunks", None):
+                    continue
+
+                if getattr(msg, "additional_kwargs", None):
+                    assistant_additional_kwargs.update(msg.additional_kwargs)
+                if getattr(msg, "response_metadata", None):
+                    assistant_response_metadata.update(msg.response_metadata)
+
+                content = _message_content_to_text(msg)
+                if content:
+                    full_response += content
+                    await output_queue.put({"type": "content", "data": content})
+        await output_queue.put(None)
+
+    # 启动两个任务：检索和生成
+    retrieval_task = asyncio.create_task(_retrieval_task())
+    generation_task = asyncio.create_task(_generation_task())
 
     try:
         # 主循环：持续从统一队列取事件并 yield SSE
-        # RAG 步骤在工具执行期间通过 call_soon_threadsafe 实时入队，不需要等 agent 产出 chunk
         while True:
-            event = await output_queue.get()
-            if event is None:
-                break
-            yield f"data: {json.dumps(event)}\n\n"
+            try:
+                event = await asyncio.wait_for(output_queue.get(), timeout=0.1)
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+            except asyncio.TimeoutError:
+                if retrieval_done and generation_task.done():
+                    break
+                continue
     except GeneratorExit:
-        # 客户端断开连接（AbortController）时，FastAPI 会向此生成器抛出 GeneratorExit
-        # 我们必须在此处取消后台任务
-        agent_task.cancel()
+        retrieval_task.cancel()
+        generation_task.cancel()
         try:
-            await agent_task
+            await retrieval_task
         except asyncio.CancelledError:
-            pass  # 任务已成功取消
-        raise  # 重新抛出 GeneratorExit 以便 FastAPI 正确处理关闭
+            pass
+        try:
+            await generation_task
+        except asyncio.CancelledError:
+            pass
+        raise
     finally:
-        # 正常结束或异常退出时清理
         set_rag_step_queue(None)
-        if not agent_task.done():
-             agent_task.cancel()
+        if not retrieval_task.done():
+            retrieval_task.cancel()
+        if not generation_task.done():
+            generation_task.cancel()
 
-    # 获取 RAG trace
     rag_context = get_last_rag_context(clear=True)
     rag_trace = rag_context.get("rag_trace") if rag_context else None
 

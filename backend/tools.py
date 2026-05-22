@@ -46,13 +46,17 @@ def reset_tool_call_guards():
 def set_rag_step_queue(queue):
     """设置 RAG 步骤队列，并捕获当前事件循环以便跨线程调度。"""
     global _RAG_STEP_QUEUE, _RAG_STEP_LOOP, _RAG_STEP_START_MONO, _RAG_STEP_LAST_MONO, _RAG_STEP_INDEX
+    import logging
+    logger = logging.getLogger(__name__)
     _RAG_STEP_QUEUE = queue
     if queue:
         import asyncio
         try:
             _RAG_STEP_LOOP = asyncio.get_running_loop()
+            logger.info(f"[set_rag_step_queue] Captured running loop: {_RAG_STEP_LOOP}")
         except RuntimeError:
             _RAG_STEP_LOOP = asyncio.get_event_loop()
+            logger.info(f"[set_rag_step_queue] Got event loop (no running loop): {_RAG_STEP_LOOP}")
         _RAG_STEP_START_MONO = time.perf_counter()
         _RAG_STEP_LAST_MONO = _RAG_STEP_START_MONO
         _RAG_STEP_INDEX = 0
@@ -66,6 +70,8 @@ def set_rag_step_queue(queue):
 def emit_rag_step(icon: str, label: str, detail: str = "", extra: Optional[dict] = None):
     """向队列发送一个 RAG 检索步骤。支持跨线程安全调用。"""
     global _RAG_STEP_QUEUE, _RAG_STEP_LOOP, _RAG_STEP_START_MONO, _RAG_STEP_LAST_MONO, _RAG_STEP_INDEX
+    import logging
+    logger = logging.getLogger(__name__)
     if _RAG_STEP_QUEUE is not None and _RAG_STEP_LOOP is not None:
         now_mono = time.perf_counter()
         if _RAG_STEP_START_MONO is None:
@@ -88,8 +94,13 @@ def emit_rag_step(icon: str, label: str, detail: str = "", extra: Optional[dict]
         try:
             if not _RAG_STEP_LOOP.is_closed():
                 _RAG_STEP_LOOP.call_soon_threadsafe(_RAG_STEP_QUEUE.put_nowait, step)
-        except Exception:
-            pass
+                _RAG_STEP_LOOP.call_soon_threadsafe(lambda: None)
+            else:
+                logger.warning(f"[emit_rag_step] Event loop is closed, step dropped: {label}")
+        except Exception as e:
+            logger.error(f"[emit_rag_step] Failed to emit step '{label}': {e}")
+    else:
+        logger.warning(f"[emit_rag_step] Queue or loop not set. queue={_RAG_STEP_QUEUE is not None}, loop={_RAG_STEP_LOOP is not None}")
 
 
 def emit_rag_payload(payload: dict):

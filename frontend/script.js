@@ -23,6 +23,8 @@ createApp({
             authLoading: false,
             showUserMenu: false,
             recentQueries: [],
+            episodicUploadStatus: null,
+            semanticUploadStatus: null,
             apiBase: window.__API_BASE__ || defaultApiBase,
             quickSymptoms: [
                 '喉咙痛',
@@ -282,7 +284,8 @@ createApp({
                 // 读取流式响应
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
-                let assistantMessage = {
+                // 使用 Vue 响应式 API 创建消息对象，确保实时更新
+                let assistantMessage = Vue.reactive({
                     role: 'assistant',
                     content: '',
                     ragSteps: [],
@@ -295,35 +298,53 @@ createApp({
                     processExpanded: false,
                     resultsExpanded: false,
                     referencesExpanded: false,
-                    relationshipsExpanded: false
-                };
+                    relationshipsExpanded: false,
+                    retrievalBubble: {
+                        steps: [],
+                        summary: '',
+                        isComplete: false
+                    },
+                    retrievalBubbleExpanded: true,
+                    refsExpanded: false
+                });
 
                 this.messages.push(assistantMessage);
 
                 let buffer = '';
+                console.log('[RAG DEBUG] Starting SSE read loop');
                 while (true) {
                     const { done, value } = await reader.read();
+                    console.log('[RAG DEBUG] Reader read:', done ? 'done' : `bytes: ${value?.length || 0}`);
                     if (done) break;
 
                     buffer += decoder.decode(value, { stream: true });
+                    console.log('[RAG DEBUG] Buffer after decode:', buffer.length, 'chars');
                     const lines = buffer.split('\n');
                     buffer = lines.pop() || '';
 
                     for (const line of lines) {
+                        console.log('[RAG DEBUG] Processing line:', line.substring(0, 50), '...');
                         if (line.startsWith('data: ')) {
                             try {
                                 const payload = line.slice(6).trim();
+                                console.log('[RAG DEBUG] Payload:', payload.substring(0, 100), '...');
                                 if (payload === '[DONE]') {
                                     assistantMessage.streaming = false;
+                                    if (assistantMessage.retrievalBubble) {
+                                        assistantMessage.retrievalBubble.isComplete = true;
+                                        assistantMessage.retrievalBubble.steps.forEach(s => s.isComplete = true);
+                                    }
                                     continue;
                                 }
                                 const data = JSON.parse(payload);
+                                console.log('[RAG DEBUG] Parsed data type:', data.type);
                                 
                                 if (data.type === 'content') {
                                     const chunk = data.data ?? data.content ?? '';
                                     assistantMessage.content += chunk;
                                     await this.yieldToBrowser();
                                 } else if (data.type === 'rag_step') {
+                                    console.log('[RAG DEBUG] Received rag_step event:', data);
                                     const step = data.step || {};
                                     assistantMessage.ragSteps.push({
                                         icon: step.icon || '•',
@@ -338,8 +359,12 @@ createApp({
                                         relation: step.relation || '',
                                         hits: Array.isArray(step.hits) ? step.hits : [],
                                         source_entities: Array.isArray(step.source_entities) ? step.source_entities : [],
-                                        evidence_sources: Array.isArray(step.evidence_sources) ? step.evidence_sources : []
+                                        evidence_sources: Array.isArray(step.evidence_sources) ? step.evidence_sources : [],
+                                        docs: step.docs || [],
+                                        extra: step.extra || {}
                                     });
+
+                                    this.buildRetrievalBubble(assistantMessage, step);
                                 } else if (data.type === 'trace') {
                                     assistantMessage.ragTrace = data.rag_trace ?? null;
                                     this.mergeRetrievedDocsFromTrace(assistantMessage);
@@ -568,6 +593,112 @@ createApp({
             return String(value);
         },
 
+        buildRetrievalBubble(message, step) {
+            if (!message.retrievalBubble) {
+                message.retrievalBubble = { steps: [], summary: '', isComplete: false };
+            }
+            const bubble = message.retrievalBubble;
+            const stepIndex = step.step_index ?? bubble.steps.length + 1;
+
+            const layer = step.layer || '';
+            const icon = step.icon || '•';
+            let label = step.label || '处理中';
+            let description = step.detail || '';
+            const details = [];
+
+            if (layer === 'entity') {
+                const items = Array.isArray(step.items) ? step.items : [];
+                if (items.length > 0) {
+                    label = `🔍 提取实体 (${items.length} 个)`;
+                    description = '从用户输入中识别医疗实体';
+                    details.push({ label: '实体类型', value: items.slice(0, 5).join('、') + (items.length > 5 ? '...' : '') });
+                }
+            } else if (layer === 'relation') {
+                const relation = step.relation || '';
+                label = `🔗 关系匹配`;
+                description = '查找实体之间的关系';
+                if (relation) {
+                    details.push({ label: '关系模板', value: relation });
+                }
+            } else if (layer === 'evidence') {
+                const hits = Array.isArray(step.hits) ? step.hits : [];
+                label = `📄 证据检索`;
+                description = '获取支撑答案的证据片段';
+                if (hits.length > 0) {
+                    details.push({ label: '检索结果', value: `${hits.length} 个相关片段` });
+                }
+            } else if (stepIndex === 1 || label.includes('query') || label.includes('Query')) {
+                label = `✨ 分析问题`;
+                description = step.detail || '正在理解您的问题';
+            } else if (label.includes('rewrite') || label.includes('Rewrite')) {
+                label = `🔄 优化查询`;
+                description = step.detail || '改进搜索策略';
+            } else if (label.includes('search') || label.includes('Search') || label.includes('retriev')) {
+                label = `🔍 语义检索`;
+                description = step.detail || '在知识库中搜索相关内容';
+            } else if (label.includes('rerank') || label.includes('Rerank') || label.includes('rank')) {
+                label = `📊 重排序`;
+                description = step.detail || '对检索结果进行相关性排序';
+            } else if (label.includes('grade') || label.includes('Grade')) {
+                label = `⭐ 质量评估`;
+                description = step.detail || '评估文档相关性';
+            } else if (label.includes('merge') || label.includes('Merge')) {
+                label = `🔗 文档合并`;
+                description = step.detail || '合并相关文档片段';
+            }
+
+            const stepDocs = step.docs || (step.extra && step.extra.docs) || [];
+            console.log('[RAG DEBUG] stepDocs length:', stepDocs.length, 'step.docs:', step.docs, 'step.extra:', step.extra);
+            if (stepDocs.length > 0) {
+                stepDocs.forEach((doc, idx) => {
+                    const filename = doc.filename || '未知来源';
+                    const page = doc.page_number || '?';
+                    const score = doc.score ? doc.score.toFixed(2) : '-';
+                    const text = (doc.text || '').substring(0, 100);
+                    details.push({
+                        label: `文档 ${idx + 1}`,
+                        value: `${filename} (P${page}) | 相关度: ${score}`,
+                        preview: text + (text.length >= 100 ? '...' : '')
+                    });
+                });
+                console.log('[RAG DEBUG] Added details:', details);
+            }
+
+            const existingIndex = bubble.steps.findIndex(s => s.step_index === stepIndex);
+            const newStep = {
+                step_index: stepIndex,
+                label,
+                description,
+                details,
+                isActive: !bubble.isComplete,
+                isComplete: bubble.isComplete
+            };
+
+            if (existingIndex >= 0) {
+                bubble.steps.splice(existingIndex, 1, newStep);
+            } else {
+                bubble.steps.push(newStep);
+            }
+
+            bubble.steps.sort((a, b) => a.step_index - b.step_index);
+            for (let i = 0; i < bubble.steps.length; i++) {
+                if (i < bubble.steps.length - 1) {
+                    bubble.steps[i].isComplete = true;
+                    bubble.steps[i].isActive = false;
+                } else {
+                    bubble.steps[i].isActive = !bubble.isComplete;
+                }
+            }
+
+            if (bubble.steps.length > 0 && !bubble.isComplete) {
+                const completedCount = bubble.steps.filter(s => s.isComplete).length;
+                const totalCount = bubble.steps.length;
+                if (completedCount > 0) {
+                    bubble.summary = `已完成 ${completedCount}/${totalCount} 个检索步骤，正在获取答案...`;
+                }
+            }
+        },
+
         saveRecentQueries() {
             localStorage.setItem('recentQueries', JSON.stringify(this.recentQueries));
         },
@@ -577,6 +708,143 @@ createApp({
             if (saved) {
                 this.recentQueries = JSON.parse(saved);
             }
+        },
+
+        async handleEpisodicUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            this.episodicUploadStatus = {
+                isComplete: false,
+                message: '正在上传文件...',
+                jobId: null
+            };
+
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const response = await this.authFetch('/documents/episodic/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const data = await response.json().catch(() => ({}));
+                    throw new Error(data.detail || '上传失败');
+                }
+
+                const data = await response.json();
+                this.episodicUploadStatus = {
+                    isComplete: false,
+                    message: data.message || '文件已上传，正在处理...',
+                    jobId: data.job_id
+                };
+
+                // 轮询任务状态
+                await this.pollJobStatus(data.job_id, 'episodic');
+            } catch (error) {
+                this.episodicUploadStatus = {
+                    isComplete: false,
+                    message: '上传失败：' + error.message,
+                    jobId: null
+                };
+            }
+
+            // 清空 input
+            event.target.value = '';
+        },
+
+        async handleSemanticUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            this.semanticUploadStatus = {
+                isComplete: false,
+                message: '正在上传文件...',
+                jobId: null
+            };
+
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const response = await this.authFetch('/documents/semantic/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const data = await response.json().catch(() => ({}));
+                    throw new Error(data.detail || '上传失败');
+                }
+
+                const data = await response.json();
+                this.semanticUploadStatus = {
+                    isComplete: false,
+                    message: data.message || '文件已上传，正在处理...',
+                    jobId: data.job_id
+                };
+
+                // 轮询任务状态
+                await this.pollJobStatus(data.job_id, 'semantic');
+            } catch (error) {
+                this.semanticUploadStatus = {
+                    isComplete: false,
+                    message: '上传失败：' + error.message,
+                    jobId: null
+                };
+            }
+
+            // 清空 input
+            event.target.value = '';
+        },
+
+        async pollJobStatus(jobId, type) {
+            const maxAttempts = 60;
+            const interval = 2000;
+
+            for (let i = 0; i < maxAttempts; i++) {
+                try {
+                    const response = await this.authFetch(`/documents/upload/jobs/${encodeURIComponent(jobId)}`);
+                    if (!response.ok) {
+                        await new Promise(r => setTimeout(r, interval));
+                        continue;
+                    }
+
+                    const job = await response.json();
+                    
+                    const status = type === 'episodic' ? this.episodicUploadStatus : this.semanticUploadStatus;
+                    
+                    if (job) {
+                        const steps = job.steps || {};
+                        const currentStep = Object.keys(steps).find(s => steps[s] && steps[s].status === 'running');
+                        
+                        if (currentStep) {
+                            status.message = steps[currentStep].message || '正在处理...';
+                        }
+
+                        if (job.is_complete) {
+                            status.isComplete = true;
+                            status.message = job.final_message || '处理完成！';
+                            return;
+                        }
+
+                        if (job.failed) {
+                            status.isComplete = false;
+                            status.message = '处理失败：' + (job.error_message || '未知错误');
+                            return;
+                        }
+                    }
+                } catch (error) {
+                    console.error('Poll error:', error);
+                }
+
+                await new Promise(r => setTimeout(r, interval));
+            }
+
+            const status = type === 'episodic' ? this.episodicUploadStatus : this.semanticUploadStatus;
+            status.message = '处理超时，请稍后检查';
         }
     }
 }).mount('#app');

@@ -18,4 +18,4 @@ volumes/
 data/
 
 # test
-tests/
+tests/result.txt

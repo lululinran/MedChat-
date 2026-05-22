@@ -172,7 +172,7 @@ def _get_stepback_model():
     if _stepback_model is None:
         _stepback_model = init_chat_model(
             model=MODEL,
-            model_provider="openai",
+            model_provider="deepseek",
             api_key=ARK_API_KEY,
             base_url=BASE_URL,
             temperature=0.2,

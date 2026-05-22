@@ -27,7 +27,7 @@ def _get_grader_model():
     if _grader_model is None:
         _grader_model = init_chat_model(
             model=GRADE_MODEL,
-            model_provider="openai",
+            model_provider="deepseek",
             api_key=API_KEY,
             base_url=BASE_URL,
             temperature=0,
@@ -43,7 +43,7 @@ def _get_router_model():
     if _router_model is None:
         _router_model = init_chat_model(
             model=MODEL,
-            model_provider="openai",
+            model_provider="deepseek",
             api_key=API_KEY,
             base_url=BASE_URL,
             temperature=0,
@@ -127,7 +127,24 @@ def retrieve_initial(state: RAGState) -> RAGState:
             f"替换片段: {retrieve_meta.get('auto_merge_replaced_chunks', 0)}"
         ),
     )
-    emit_rag_step("✅", f"检索完成，找到 {len(results)} 个片段", f"模式: {retrieve_meta.get('retrieval_mode', 'hybrid')}")
+
+    if results:
+        doc_summaries = []
+        for i, doc in enumerate(results[:5], 1):
+            filename = doc.get("filename", "未知来源")
+            page = doc.get("page_number", "?")
+            score = doc.get("score", 0)
+            text_preview = (doc.get("text", "")[:80] + "...") if len(doc.get("text", "")) > 80 else doc.get("text", "")
+            doc_summaries.append(f"[{i}] {filename} (P{page}, 相关度:{score:.2f})")
+        emit_rag_step(
+            "📄",
+            f"检索完成，找到 {len(results)} 个片段",
+            f"模式: {retrieve_meta.get('retrieval_mode', 'hybrid')}\n" + "\n".join(doc_summaries),
+            {"docs": results[:5]}
+        )
+    else:
+        emit_rag_step("⚠️", "检索完成，未找到相关片段", f"模式: {retrieve_meta.get('retrieval_mode', 'hybrid')}")
+
     emit_rag_payload({
         "type": "retrieved_docs",
         "stage": "initial",
